@@ -1,0 +1,27 @@
+# Stage 2 — GRPO router training
+# reward = correctness - lambda_tok * tokens * (1 - d) + lambda_obey * honoured * correct
+# where d is the external verifier difficulty score (the (1-d) gating is our novelty).
+model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+data: data/gsm8k_train_labelled.jsonl
+verifier_ckpt: outputs/verifier-400m/best.pt
+output_dir: outputs/router-seed0
+
+# auto-tuned by VRAM in train_grpo.py; values here are the 24 GB (RTX 4090) profile
+steps: 1500
+group_size: 8          # num_generations
+max_seq_len: 2048
+batch: 1
+grad_accum: 4
+use_vllm: true
+vllm_gpu_memory_utilization: 0.45
+
+# optimisation / stability
+lr: 1.0e-5
+kl_beta: 5.0e-3        # KL anchor — keep low to avoid entropy collapse
+lambda_tok: 3.0e-3
+lambda_obey: 0.05
+
+# reliability
+save_steps: 50
+save_total_limit: 3
+seeds: [0, 1, 2]       # run 3 for confidence intervals
