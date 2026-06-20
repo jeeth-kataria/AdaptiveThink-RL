@@ -1,0 +1,13 @@
+# Stage 1 — 400M difficulty verifier distillation
+# Consumed as documentation/defaults; CLI flags in src/adaptivethink/verifier/train.py override.
+encoder_name: Qwen/Qwen2.5-0.5B-Instruct
+train: data/teacher_labels.jsonl
+eval: data/verifier_eval_labelled.jsonl
+out: outputs/verifier-400m/best.pt
+epochs: 3
+batch: 32
+lr: 2.0e-5
+max_len: 512
+# loss = MSE(sigmoid(logit), soft_label) + 0.2 * BCE(logit, hard_label>0.5)
+aux_bce_weight: 0.2
+target_spearman_rho: 0.5   # warn below this
