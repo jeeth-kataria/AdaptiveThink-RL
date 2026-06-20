@@ -1,0 +1,13 @@
+# Optional Idea A — Test-Time RL on unlabeled MMLU
+# Pseudo-label = confidence-weighted majority vote over the rollout group.
+adapter: outputs/router-seed0     # warm-start from the trained router (or null)
+output_dir: outputs/ttrl-seed0
+n: 500                            # unlabeled MMLU items
+steps: 300
+group_size: 8
+max_seq_len: 2048
+lr: 1.0e-5
+kl_beta: 1.0e-3                   # low KL + entropy headroom (Clip-Cov spirit)
+lambda_tok: 1.0e-3
+conf_weight: true                 # scale reward by majority vote share
+temperature: 0.8                  # diversity for the vote
