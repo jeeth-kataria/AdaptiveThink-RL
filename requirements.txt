@@ -1,0 +1,33 @@
+# =============================================================================
+# DO NOT `pip install -r requirements.txt` for the RL pipeline.
+# The pinned, mutually-compatible GPU stack (vLLM 0.19.1 / torch 2.10 / TRL 0.24
+# / Unsloth / transformers 4.57.6) is installed by the single master script:
+#
+#     ./run.sh setup
+#
+# It resolves the vLLM<->torch<->Unsloth<->transformers version conflict and
+# writes the exact resolved set to requirements.lock. See RUNBOOK.md.
+#
+# The pins BELOW are the LEGACY stack from the original DeepSeek-1.5B router work
+# and are INCOMPATIBLE with the new RL core — kept only for reference, commented.
+# =============================================================================
+# torch==2.4.1
+# transformers==4.46.3
+# accelerate==1.1.1
+# peft==0.13.2
+# bitsandbytes==0.44.1
+# trl==0.12.1
+# datasets==3.1.0
+# wandb==0.18.7
+# huggingface-hub==0.26.5
+# sentencepiece==0.2.0
+# openai==1.54.0
+# httpx==0.27.2
+# python-dotenv==1.0.1
+# scipy==1.14.1
+# numpy==1.26.4
+# matplotlib==3.9.2
+# pyyaml==6.0.2
+# flash-attn==2.7.0.post2   (skip; Unsloth uses xformers+Triton)
+# vllm==0.6.4.post1
+# llama-cpp-python==0.3.2

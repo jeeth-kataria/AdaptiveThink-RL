@@ -1,0 +1,53 @@
+# requirements.lock — pinned, verified-compatible stack for single-GPU GRPO
+# on Qwen2.5-3B-Instruct (Linux, CUDA 12.x, mid-2026).
+#
+# Verified against PyPI requires_dist on 2026-06-18. This is the STATIC seed
+# of the lock; `./run.sh setup` regenerates it with the full `pip freeze` of
+# the resolved environment after a successful install.
+#
+# INSTALL ORDER MATTERS (run.sh setup enforces it):
+#   1. vLLM FIRST  — it is the strictest torch pinner (-> torch 2.10.0).
+#   2. re-pin the torch trio defensively.
+#   3. Unsloth + transformers/trl/peft/accelerate/bnb/datasets into the window.
+#   4. repo runtime deps (loose; must not move torch).
+#   5. lm-eval LAST with --no-deps (its loose floors would otherwise upgrade torch).
+#   6. flash-attn — SKIP (no official torch-2.10 wheel; Unsloth uses xformers + Triton).
+#
+# THE CORE CONFLICT this set resolves: latest vllm (>=0.20) pins torch==2.11.0,
+# but unsloth 2026.6.7 requires torch<2.11 -> `pip install unsloth vllm` is
+# UNSOLVABLE today. vllm 0.19.1 (torch 2.10.0) is the highest vLLM Unsloth allows.
+
+# --- core pinned set (the resolved window) ---
+vllm==0.19.1
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+unsloth==2026.6.7
+unsloth_zoo>=2026.6.5
+transformers==4.57.6
+trl==0.24.0
+peft==0.19.1
+accelerate==1.14.0
+bitsandbytes==0.49.2
+datasets==3.6.0
+lm-eval==0.4.12   # install with --no-deps
+
+# --- repo runtime deps (loose so they never move torch) ---
+huggingface-hub
+sentencepiece
+openai
+httpx
+python-dotenv
+scipy
+numpy
+matplotlib
+pyyaml
+wandb
+
+# --- lm-eval runtime deps (no pins so they cannot upgrade torch/transformers/vllm) ---
+sqlitedict
+jsonlines
+tqdm-multiprocess
+more-itertools
+evaluate
+pytablewriter
