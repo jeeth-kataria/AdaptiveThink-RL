@@ -4,7 +4,7 @@
 - **Team:** StateZero — Jeeth Bhavesh Kataria, Ojasvi Poonia (Ramaiah Institute of Technology, Bengaluru)
 - **Base model (frozen, identical for baseline and trained):** `Qwen/Qwen2.5-1.5B-Instruct` (Apache-2.0)
 - **Method:** Dr.GRPO + rule-based verifiable rewards (RLVR). No SFT, **no LLM/teacher API anywhere**.
-- **Trained artifact:** LoRA adapter `outputs/grpo-seed0-v2` (18.46M trainable params, 1.18% of the model).
+- **Trained artifact:** LoRA adapter `outputs/grpo-seed0-v2` (18.46M trainable params, 1.18% of the model), published at [Ojasvi-Poonia/adaptivethink-qwen2.5-1.5b-grpo](https://huggingface.co/Ojasvi-Poonia/adaptivethink-qwen2.5-1.5b-grpo).
 
 All numbers are **Pass@1, greedy, single-shot**, produced by the **identical** evaluator
 ([`eval/eval_kpi.py`](../eval/eval_kpi.py)) for baseline and trained model — same `<think>/<answer>`
