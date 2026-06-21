@@ -18,6 +18,8 @@ This is the **only** model in the pipeline, and the solution is **fully API-free
 So every gain belongs to the small model itself — it never sees an external model's answers. All
 supporting tooling is open-source (TRL, Unsloth, vLLM, PEFT).
 
+**Model published:** [`Ojasvi-Poonia/adaptivethink-qwen2.5-1.5b-grpo`](https://huggingface.co/Ojasvi-Poonia/adaptivethink-qwen2.5-1.5b-grpo) — our RL-trained LoRA adapter (Apache-2.0).
+
 ## 2. Agentic, verification-driven reasoning
 
 Our solution is "agentic" in two concrete, reproducible senses:
