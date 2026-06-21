@@ -114,7 +114,7 @@ generalized instead of overfitting.
 ## 7. Installation
 
 ```bash
-./run.sh setup     # builds the pinned venv (see WHERE_TO_RUN.md for environment notes)
+./run.sh setup     # builds the pinned venv (vLLM 0.19.1 / torch 2.10 / TRL 0.24 / Unsloth)
 ```
 For inference-only on a laptop (Apple Silicon / CPU): `pip install torch transformers peft accelerate`
 and run `python demo.py --compare` — no CUDA/vLLM needed.
