@@ -6,8 +6,8 @@
 - **Team members (Names)** - Jeeth Bhavesh Kataria, Ojasvi Poonia
 - **Institute/College Name** - Ramaiah Institute of Technology, Bengaluru, Karnataka – 560054
 - **Final Presentation Google Drive Link** - https://drive.google.com/file/d/1LLsF_nHmDzi1ytzZ1KZEmoifqbs8XRKk/view?usp=sharing
-- **Full Submission Demo Video Link** - <!-- TODO: add YouTube/Drive demo video link -->
-- **Setup & Result Reproducibility Video Link** - <!-- TODO: add YouTube/Drive reproducibility video link -->
+- **Full Submission Demo Video Link** - https://youtu.be/6QsA3Kq_X7A
+- **Setup & Result Reproducibility Video Link** - https://youtu.be/qk5PH8_qyYc
 
 ---
 
