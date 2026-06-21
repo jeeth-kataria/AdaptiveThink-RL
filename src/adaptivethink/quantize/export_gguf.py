@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-BASE_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def merge_adapter(base_model: str, adapter_path: str, out_dir: str) -> str:

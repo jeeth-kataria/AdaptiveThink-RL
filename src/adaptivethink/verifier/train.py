@@ -114,12 +114,13 @@ def train(args):
 
     print(f"[verifier] Done. Best Spearman ρ = {best_rho:.4f}")
     if best_rho < 0.5:
-        print("WARNING: ρ < 0.5 — verifier quality is poor. Re-check teacher labels.")
+        print("WARNING: ρ < 0.5 — verifier quality is poor. Re-check the "
+              "self-difficulty labels (mean difficulty, learnable fraction).")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--train",  default="data/teacher_labels.jsonl")
+    p.add_argument("--train",  default="data/self_difficulty.jsonl")
     p.add_argument("--eval",   default="data/verifier_eval_labelled.jsonl")
     p.add_argument("--out",    default="outputs/verifier-400m/best.pt")
     p.add_argument("--epochs", type=int,   default=3)

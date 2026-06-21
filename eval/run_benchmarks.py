@@ -133,7 +133,7 @@ def eval_benchmark_seeds(pipeline, name, n, seeds, k_list, n_samples):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model-name", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    p.add_argument("--model-name", default="Qwen/Qwen2.5-1.5B-Instruct")
     p.add_argument("--adapter", default=None, help="PEFT router adapter dir")
     p.add_argument("--verifier-ckpt", default=None)
     p.add_argument("--gguf", default=None, help="GGUF Q4_K_M file (on-device backend)")

@@ -358,7 +358,7 @@ class AdaptivePipeline:
 
 
 def build_pipeline(
-    model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
     adapter_path: str | None = None,
     verifier_ckpt: str | None = None,
     gguf_path: str | None = None,

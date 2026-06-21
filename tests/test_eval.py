@@ -144,3 +144,53 @@ def test_kpi_table_two_present_one_met_is_not_pass():
     out = kpi_table(baseline, [router])
     assert "(PASS)" not in out
     assert "1/2" in out
+
+
+# --- CCDD self-difficulty pure logic (REUSES the GRPO verifier/matcher) ---
+#
+# These are dependency-light: self_difficulty's scoring helpers reuse
+# router.reward.extract_answer + _answers_match (no torch/vllm/datasets), so the
+# contract requirement — CCDD's notion of "solved" is identical to the reward —
+# is testable here without loading any model or dataset.
+
+from adaptivethink.rl.self_difficulty import (  # noqa: E402
+    score_solve_rate, difficulty_from_solve_rate, is_learnable,
+)
+
+
+def test_ccdd_difficulty_is_one_minus_solve_rate():
+    # The CCDD core identity (the API-free novelty): difficulty = 1 - solve_rate.
+    assert difficulty_from_solve_rate(0.0) == 1.0
+    assert difficulty_from_solve_rate(1.0) == 0.0
+    assert difficulty_from_solve_rate(0.25) == 0.75
+
+
+def test_ccdd_solve_rate_reuses_reward_matcher():
+    # Two of four rollouts give a clearly-labelled correct letter -> 0.5.
+    # This goes through the SAME extract_answer + _answers_match the reward uses.
+    samples = [
+        "reasoning... the answer is \\boxed{C}",   # correct
+        "I will guess \\boxed{B}",                  # wrong
+        "final answer is C",                        # correct
+        "no answer at all",                         # unparseable
+    ]
+    assert score_solve_rate(samples, "C") == 0.5
+
+
+def test_ccdd_solve_rate_numeric_and_boolean_tolerance():
+    # Matcher tolerance must carry through CCDD: '72'=='72.0', 'yes'=='True'.
+    assert score_solve_rate(["\\boxed{72.0}", "\\boxed{72}"], "72") == 1.0
+    assert score_solve_rate(["the answer is \\boxed{yes}"], "True") == 1.0
+
+
+def test_ccdd_solve_rate_empty_is_zero():
+    # No rollouts -> solve_rate 0.0 (difficulty 1.0); never divides by zero.
+    assert score_solve_rate([], "C") == 0.0
+
+
+def test_ccdd_curriculum_filter_drops_extremes():
+    # Curriculum filter keeps only the learnable band: drop 0.0 (unsolvable) and
+    # 1.0 (trivial) — both give zero-advantage GRPO groups.
+    assert is_learnable(0.5)
+    assert not is_learnable(0.0)
+    assert not is_learnable(1.0)

@@ -1,66 +1,58 @@
 # =============================================================================
-# Strategy 1 — Distillation cold-start + Dr.GRPO RLVR on a non-saturated base.
+# Strategy 1 — Dr.GRPO RLVR on a non-saturated base (API-free, teacher-free).
 # =============================================================================
-# This file is the single source of truth for the staged Strategy-1 plan
-# (new.md Strategy 1 + Strategy 6). Values map 1:1 to the CLI args of:
-#   * SFT cold-start : python -m adaptivethink.rl.sft_coldstart
-#   * Dr.GRPO RL     : python -m adaptivethink.rl.drgrpo_train
+# This file is the single source of truth for the staged Strategy-1 plan.
+# Values map 1:1 to the CLI args of:
+#   * Dr.GRPO RL : python -m adaptivethink.rl.drgrpo_train
 # run.sh reads model/datasets/seeds/steps from here; per-flag tuning lives below.
 #
-# Target framing (new.md Meta Advice):
-#   IMPROVE  -> GSM8K, StrategyQA   (rule-based exact-match reward; headroom for +5%)
-#   MAINTAIN -> MMLU                (knowledge MC; RL on math reasoning barely moves it)
+# Target framing (Meta Advice):
+#   IMPROVE  -> GSM8K, StrategyQA, AQuA-RAT  (rule-based exact-match reward)
+#   MAINTAIN -> MMLU                         (knowledge MC; eval-only, NEVER trained)
 #   Always report the SAME lm-eval harness config for baseline AND trained model,
 #   and report MULTI-SEED runs with confidence intervals (RL is high-variance).
+#
+# HARD RULES (interface contract):
+#   * Never train on any MMLU split or any test split.
+#   * No teacher API anywhere — reward is pure RLVR (exact-match) and the
+#     curriculum signal (CCDD) comes from the base model's OWN solve-rate.
 # =============================================================================
 
 # ── model ─────────────────────────────────────────────────────────────────────
-# Primary base is the non-saturated Qwen2.5-3B-Instruct (NOT the math-distilled
-# DeepSeek distill). Fallback to 1.5B-Instruct if 3B baseline GSM8K is too high
-# (>80% leaves no headroom) or VRAM is tight (--model on the CLI overrides this).
-model: Qwen/Qwen2.5-3B-Instruct
-fallback_model: Qwen/Qwen2.5-1.5B-Instruct
+# Default base is the non-saturated Qwen2.5-1.5B-Instruct. 3B / 7B are one-flag
+# switches (--model on the CLI overrides this): all Qwen2.5 share ChatML + the
+# same 7 LoRA modules (q/k/v/o/gate/up/down_proj). Do NOT hardcode DeepSeek.
+model: Qwen/Qwen2.5-1.5B-Instruct
 
 # ── benchmarks ──────────────────────────────────────────────────────────────--
-datasets: gsm8k,strategyqa          # the two IMPROVE targets (drgrpo --datasets)
-maintain_benchmark: mmlu            # eval-only; not trained on
+# Train pool ~6.1k rows, mixed 45/30/25 across the three IMPROVE datasets:
+#   gsm8k (45%) / strategyqa (30%) / aqua (25%).
+datasets: gsm8k,strategyqa,aqua     # the three IMPROVE targets (drgrpo --datasets)
+maintain_benchmark: mmlu            # eval-only; NEVER trained on
 
 # ── reproducibility ─────────────────────────────────────────────────────────--
-seeds: [0, 1, 2]                    # run all 3 for confidence intervals
-max_seq_len: 2048                   # RL seq budget (prompt + completion caps)
+train_seeds: [0]                    # single train seed (24h budget)
+eval_seeds: [0, 1, 2]              # eval all 3 for confidence intervals
 
 # =============================================================================
-# Stage A — SFT cold-start (Day 3-5). Installs the <think>/<answer> format.
-# Maps to: python -m adaptivethink.rl.sft_coldstart
+# CCDD — Curriculum from the model's OWN difficulty (the API-free novelty).
 # =============================================================================
-sft:
-  enabled: true                     # set false to RL directly from the base
-  traces: simplescaling/s1K-1.1     # DeepSeek-R1 traces (deepseek_thinking_trajectory
-                                    # / deepseek_attempt). ~1k rows, right-sized.
-  config: null                      # dataset config; e.g. "default" for OpenR1/OpenThoughts
-  split: train
-  out: outputs/sft
-  steps: 500                        # SHORT cold-start (<=0 => use epochs instead)
-  epochs: 1.0                       # used only when steps <= 0
-  max_examples: 4000                # cap for a short cold-start (DATA research: 1-4k)
-  max_seq_len: 4096                 # longer than RL: R1 traces are verbose
-  lr: 2.0e-4                        # QLoRA SFT LR
-  lora_rank: 32
-  batch: 1
-  grad_accum: 8
-  validate_answers: false          # drop traces whose <answer> != gold (router.reward matcher)
-  # Alternative right-sized trace sources (swap into `traces`):
-  #   open-r1/OpenR1-Math-220k        (config: default ~93.7k; subsample via max_examples)
-  #   open-thoughts/OpenThoughts-114k (config: default — ShareGPT chat; R1 traces)
+# difficulty = 1 - (base model's empirical solve-rate over K rollouts per item).
+# A separate self-difficulty pass writes data/self_difficulty.jsonl with rows
+#   {question, answer, difficulty}
+# using the SAME verifier the reward uses. The curriculum filter drops pool items
+# whose solve_rate is 0.0 (unsolvable) or 1.0 (trivial) — both give zero-advantage
+# GRPO groups. When self_difficulty_file is unset, training uses the full pool.
+self_difficulty_file: data/self_difficulty.jsonl
 
 # =============================================================================
-# Stage B — Dr.GRPO RL (Day 5-8). The accuracy core.
+# Dr.GRPO RL — the accuracy core. 24h config.
 # Maps to: python -m adaptivethink.rl.drgrpo_train
-# Knobs map VERBATIM to TRL 0.29.1 GRPOConfig (ALGO research).
+# Knobs map VERBATIM to TRL GRPOConfig (ALGO research).
 # =============================================================================
 grpo:
   out: outputs/grpo                 # run.sh appends -seed<S>
-  steps: 1500                       # ~1-1.5k steps (DeepScaleR-scale)
+  steps: 400                        # 24h budget
   group_size: 8                     # num_generations G (effective batch must divide by it)
 
   # (a) Dr.GRPO bias fix — BOTH knobs needed for the full fix:
@@ -69,7 +61,7 @@ grpo:
                                     # (kills per-group std / difficulty bias).
 
   # (c) KL: 0.0 => no ref model loaded (saves memory). Ablation favors no-KL for tiny models.
-  kl: 0.0                           # GRPOConfig beta. (Day 6-8: also try 1.0e-3 per DeepSeek-R1.)
+  kl_beta: 0.0                      # GRPOConfig beta.
 
   # (b) Clip-Higher: OFF for tiny models (ablation: hurts) AND inert at on-policy mu=1.
   clip_higher: false                # --clip-higher sets epsilon_high=0.28
@@ -77,14 +69,14 @@ grpo:
   # (d) Entropy: TRL has NO additive bonus. This is top_entropy_quantile (token-mask).
   entropy: 1.0                      # 1.0 = train on ALL tokens; do NOT lower for tiny models
 
-  # Difficulty filter: offline, drop base-unsolvable (p_solve==0) and trivial (==1) items.
-  difficulty_filter: false          # turn on in Day 6-8 if frac_reward_zero_std is high
-  difficulty_k: 8                   # base-model samples per item to estimate pass-rate
+  one_shot: false                   # true => 1 item/dataset (smoke)
 
-  one_shot: false                   # true => 1 item/dataset (Strategy 3 flex / smoke)
+  # seq-len budget (Dr.GRPO 24h config)
+  max_prompt_length: 512            # GRPOConfig max_prompt_length
+  max_completion_length: 1024       # GRPOConfig max_completion_length (also the 1/L constant)
 
   # optimisation / hygiene
-  lr: 1.0e-6                        # GRPOConfig default; small LR for RL
+  lr: 1.0e-6                        # small LR for RL
   batch: 8                          # per_device_train_batch_size
   grad_accum: 4                     # gradient_accumulation_steps
   lora_r: 16
@@ -94,7 +86,8 @@ grpo:
   # Reward composition (set in trainer; documented here):
   #   reward_funcs = [correctness (exact-match, weight 1.0),
   #                   format     (<think>...</think><answer>...</answer>, weight 0.2)]
-  # Keep format weight SMALL so correctness cannot be gamed.
+  # Correctness REUSES src/adaptivethink/router/reward.py extract_answer +
+  # _answers_match (numeric/boolean/letter/fraction tolerant). No teacher API.
   reward_weights: [1.0, 0.2]
 
 # =============================================================================

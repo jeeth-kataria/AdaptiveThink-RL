@@ -28,7 +28,7 @@ import re
 from typing import Any, Callable, Sequence
 
 # Reuse the repo's robust answer logic — do NOT reimplement (interface contract).
-from adaptivethink.router.reward import _answers_match, extract_answer
+from adaptivethink.router.reward import _answers_match, extract_answer, match_answer
 
 # The <answer>…</answer> payload. DOTALL so multi-line answers are captured.
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
@@ -126,7 +126,7 @@ def correctness_reward(completions: Sequence[Any], **kwargs: Any) -> list[float]
             out.append(0.0)
             continue
         pred = predicted_answer(text)
-        ok = pred is not None and _answers_match(pred, str(gt))
+        ok = match_answer(pred, str(gt))
         out.append(1.0 if ok else 0.0)
     return out
 

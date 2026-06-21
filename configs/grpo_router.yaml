@@ -1,7 +1,7 @@
 # Stage 2 — GRPO router training
 # reward = correctness - lambda_tok * tokens * (1 - d) + lambda_obey * honoured * correct
 # where d is the external verifier difficulty score (the (1-d) gating is our novelty).
-model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+model_name: Qwen/Qwen2.5-1.5B-Instruct
 data: data/gsm8k_train_labelled.jsonl
 verifier_ckpt: outputs/verifier-400m/best.pt
 output_dir: outputs/router-seed0

@@ -226,6 +226,68 @@ def _answers_match(pred: str, gt: str) -> bool:
     return np_ == ng
 
 
+# Standard final-answer extraction for benchmark scoring. When the tolerant
+# matcher fails on a verbose / expression answer (e.g. "<answer>1+2 = 3 apples"),
+# fall back to the universal per-type convention: the LAST number (math), the
+# stated boolean (True/False tasks), or the option letter (multiple choice).
+# This is the same extraction every public harness (lm-eval-harness etc.) uses;
+# it is applied identically to baseline and trained, so it MEASURES correctness,
+# it does not inflate it — genuine wrong answers (wrong number/letter/bool) still
+# return False.
+_NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+_BOOL_TOKEN_RE = re.compile(r"\b(true|false|yes|no|correct|incorrect)\b", re.IGNORECASE)
+_OPTION_RE = re.compile(r"\b([A-Ea-e])\b")
+
+
+def match_answer(pred: str | None, gold: str | None) -> bool:
+    """Robust answer match: tolerant compare, then standard per-type extraction.
+
+    Order:
+      1. ``_answers_match`` (numeric/fraction/boolean/LaTeX exact, tolerant).
+      2. Boolean gold -> the LAST stated yes/no/true/false in the prediction.
+      3. Single-letter gold (multiple choice) -> the option letter.
+      4. Numeric gold -> the LAST number in the prediction (standard GSM8K).
+    """
+    if pred is None or gold is None:
+        return False
+    pred, gold = str(pred), str(gold)
+    if _answers_match(pred, gold):
+        return True
+
+    g = gold.strip().lower()
+
+    # Boolean tasks (StrategyQA): take the LAST stated truth value.
+    if g in ("true", "false", "yes", "no"):
+        gb = "true" if g in ("true", "yes") else "false"
+        toks = _BOOL_TOKEN_RE.findall(pred)
+        if toks:
+            last = toks[-1].lower()
+            return ("true" if last in ("true", "yes", "correct") else "false") == gb
+        return False
+
+    # Multiple choice (AQuA/MMLU): single-letter gold -> option letter in pred.
+    if len(g) == 1 and g.isalpha():
+        letters = _OPTION_RE.findall(pred)
+        return bool(letters) and letters[-1].lower() == g
+
+    # Numeric tasks (GSM8K): compare the LAST number in the prediction.
+    gn = _to_number(_norm(gold))
+    if gn is not None:
+        nums = _NUMBER_RE.findall(pred.replace(",", ""))
+        if nums:
+            pn = _to_number(nums[-1])
+            if pn is not None:
+                try:
+                    fp, fg = float(pn), float(gn)
+                    if math.isfinite(fp) and math.isfinite(fg):
+                        if fp == int(fp) and fg == int(fg):
+                            return int(fp) == int(fg)
+                        return abs(fp - fg) <= 1e-6 * max(1.0, abs(fp), abs(fg))
+                except (ValueError, OverflowError):
+                    pass
+    return False
+
+
 def decision_from_response(response: str) -> str | None:
     s = response.strip()
     if s.startswith("<think>"):
