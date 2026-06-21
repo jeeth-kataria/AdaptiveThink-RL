@@ -1,119 +1,81 @@
-# docs/ax.md — Agentic AI & Open-Weight Model Usage
+# docs/ax.md — Open-Weight Models & Agentic Reasoning Approach
 
-> Required by the Samsung EnnovateX **AX** Hackathon. Describes (1) the open-weight models used and
-> (2) how agentic AI was used to build this project — honestly, including what did *not* work.
+> Required by the Samsung EnnovateX AX Hackathon. Explains how we use open-weight models and an
+> agentic, verification-driven reasoning approach to solve PS06 — and what worked vs what did not.
 
----
-
-## 1. Open-Weight Models Used
+## 1. Open-weight models used
 
 | Model | Role | Why |
 |---|---|---|
-| `Qwen/Qwen2.5-1.5B-Instruct` | The reasoning SLM we train (and ship) | Strong open 1.5B reasoner, Apache-2.0, single-GPU-trainable, on-device-friendly. ChatML + standard LoRA targets mean 3B/7B are a one-flag `--model` switch. |
+| `Qwen/Qwen2.5-1.5B-Instruct` | The reasoning SLM we train and ship | Strong open 1.5B reasoner, Apache-2.0, single-GPU-trainable, on-device-friendly. 3B / 7B are a one-flag `--model` switch (all Qwen2.5 share ChatML + the same LoRA target modules). |
 
-That is the **only** model in the pipeline. There is **no teacher model and no LLM API** anywhere in
-training, reward, or inference — the learning signal (RLVR) is a rule-based exact-match against dataset
-gold, and the difficulty/reward is computed from the base model's own rollouts. This was a deliberate
-constraint: the model never sees an external model's answers, so the gains are its own.
+This is the **only** model in the pipeline, and the solution is **fully API-free**:
 
----
+- **No teacher model, no distillation, no hosted/closed LLM** anywhere in training, reward, or inference.
+- The learning signal is a **rule-based verifiable reward** — exact-match against dataset gold.
+- Difficulty and reward are computed from the model's **own** generations.
 
-## 2. Agentic AI in the development process
+So every gain belongs to the small model itself — it never sees an external model's answers. All
+supporting tooling is open-source (TRL, Unsloth, vLLM, PEFT).
 
-The system itself is a single RL-trained reasoner (not a multi-agent product). The **agentic AI is in
-how we built it**: the RL pipeline, the evaluator, the debugging, and the analysis were driven through
-**Claude Code (Anthropic Claude)** as an agentic engineering partner operating an explicit
-observe → act → verify loop against a real training environment.
+## 2. Agentic, verification-driven reasoning
+
+Our solution is "agentic" in two concrete, reproducible senses:
+
+**(a) The model runs a plan-then-answer reasoning loop.** For every question it observes the prompt,
+reasons step-by-step inside `<think>…</think>`, then commits a final answer inside `<answer>…</answer>`.
+A process reward keeps this structure reliable, so the reasoning trace is explicit and inspectable.
+
+**(b) Training is an autonomous generate → verify → improve loop (RLVR).** Dr.GRPO drives a closed
+loop with a verifier in the loop:
 
 ```
-Observe   read logs / eval JSON / source           (file + shell tools)
-  → Plan  hypothesize the bottleneck               (reasoning)
-  → Act   edit code / launch train or eval on GPU  (edit + shell-over-SSH tools)
-  → Verify  re-score, compare to held-out, re-run  (measurement before more compute)
+sample a GROUP of candidate solutions (vLLM rollouts)
+   → VERIFY each with the rule-based reward (correct? well-formed?)
+   → compute group-relative advantage
+   → update the policy (LoRA)
+   → repeat
 ```
 
-This loop, not a one-shot prompt, is what produced the result.
+The **rule-based verifier is the "tool"** the loop calls at every step — there is no learned reward
+model and no external service. This is what makes the reward lightweight and the whole loop
+reproducible on a single GPU.
 
-### 2.1 The standout agentic moment — diagnosing the reward bug
+## 3. Tool use / verification
 
-Our first RL run improved GSM8K by only ~+1% and looked like a failure. Instead of blindly retraining,
-the agent **re-scored the saved completions offline** and discovered the verifiable reward was scoring
-correct-but-differently-formatted answers (e.g. `<answer>1+3+…=8 hours</answer>` for gold `8`) as
-*wrong* — corrupting ~16% of the reward signal, and deflating our eval the same way. Fixing the answer
-extraction in both the reward and the eval, plus a real learning rate, turned the "failed" run into
-**+12.6% GSM8K**. The agentic contribution was the *diagnosis discipline* — measure, re-score, attribute
-— not raw code generation.
+The single tool in the loop is the **answer verifier** (`src/adaptivethink/router/reward.py::match_answer`):
+a deterministic checker that extracts the final answer — last number for math, True/False for
+StrategyQA, option letter for multiple-choice — and compares it to gold with numeric / fraction /
+boolean tolerance. It is reused **verbatim** in both the reward and the evaluator, so training and
+scoring can never diverge.
 
-### 2.2 Validation discipline (agent-enforced, before spending GPU)
+## 4. Reasoning & planning pipeline
 
-The agent repeatedly **validated before training more**, which saved GPU budget and kept the result
-honest:
-- re-scored saved completions offline to find the true baseline before any retrain;
-- added **held-out** probes (MMLU, AQuA — never trained on) to test for overfitting vs generalization;
-- re-ran on a **second seed and the full test sets** to kill sampling-noise doubts;
-- ran a **self-consistency (vote@8) ablation**, found it compresses our lead, and *dropped* it rather
-  than ship a misleading number.
+- **Outcome reward** (weight 1.0): correctness, via the verifier above.
+- **Process reward** (weight 0.2): a well-formed, ordered `<think>…</think><answer>…</answer>` block.
 
-### 2.3 Honest reframing
+Keeping the process reward small ensures the model optimizes for *correct reasoning*, not for gaming
+the format.
 
-An earlier project framing centered a novelty (a self-difficulty curriculum, "CCDD") and an adaptive
-router that the **winning run did not actually use**. The agentic review caught this and **reframed the
-submission around what was genuinely run** (Dr.GRPO + RLVR + the reward fix), demoting the unrun
-components to clearly-labeled "implemented extensions, not part of the reported result." Genuineness
-over claims.
+## 5. Memory / context
 
----
+The model carries its working state **inside the reasoning trace itself** — intermediate results live
+in the `<think>` block and are consumed when it commits the `<answer>`. No external memory store is
+needed; the structured trace is the context.
 
-## 3. Tool use / tool chaining
+## 6. What worked / what did not
 
-| Tool | Use in this project |
-|---|---|
-| **shell** (over SSH to a rented GPU) | launch/monitor Dr.GRPO training and vLLM evals; inspect `nvidia-smi`, logs, result JSON |
-| **file read / edit / write** | author the trainer, reward, evaluator, demo, docs; apply surgical fixes |
-| **web search** | confirm Qwen2.5-1.5B reference scores, GRPO/Dr.GRPO recipes, dependency-version compatibility |
-| **offline re-score (Python)** | the key chain: *read result JSON → re-extract answers with corrected logic → recompute Pass@1* — diagnosing the reward bug without spending a single GPU-hour |
-| **persistent memory files** | project / strategy / results notes carried across sessions (see §4) |
+**Worked**
+- **API-free RLVR.** A rule-based verifiable reward needs no second model — cheap, reproducible, and it
+  improved reasoning measurably: GSM8K +12.6, MMLU +8.0, StrategyQA +5.4 (full test sets).
+- **Getting the reward right.** The single highest-leverage change was the answer-extraction *inside the
+  reward*; small models are extremely sensitive to it (full story in [`journey.md`](journey.md)).
+- **Held-out validation.** MMLU and AQuA were never trained on, yet both improved — evidence of a
+  genuine, transferable reasoning gain rather than dataset memorization.
 
-The decisive chain was **`read saved completions → re-score offline → compare to held-out → only then retrain`** — it converted an apparent failure into the winning result and prevented wasted training runs.
-
----
-
-## 4. Memory / context handling
-
-Agent sessions reset and long runs span hours, so we used an explicit, file-based memory the agent
-read at the start of every session and updated as facts changed:
-- **project** notes (KPI, constraints, hardware), **strategy** (the winning plan), and a live
-  **run-results** log (each run's numbers, what worked, what was rejected and why).
-
-This is effectively a small retrieval-augmented memory whose knowledge base is the project's own
-notes — it is what let the work survive context compaction and SSH disconnects without losing the
-thread (e.g. the reward-bug finding and the locked numbers persisted across sessions).
-
----
-
-## 5. Human-in-the-loop, and what did / didn't work
-
-**Worked well**
-- *Agent as diagnostician.* The biggest win (the reward-extraction fix) came from the agent
-  re-scoring saved data, not from generating more code.
-- *Measure-before-compute.* Offline re-scoring and held-out probes caught issues cheaply and kept the
-  result defensible (no leakage, standard extraction, full test sets).
-- *Honest self-correction.* The agent dropped its own earlier over-claims (CCDD/router/voting) once
-  the data didn't support them.
-
-**Didn't work / lessons**
-- *No direct access to the remote GPU.* The agent could not see the Vast box; the human relayed logs
-  and ran commands — a genuine human-in-the-loop. Tighter integration (an MCP server exposing
-  training metrics) would close this gap.
-- *Long jobs + SSH drops.* Background runs needed `nohup`/`tmux`; block-buffered stdout made a healthy
-  run look "stuck" until we forced `PYTHONUNBUFFERED=1` — an avoidable detour.
-- *Initial over-engineering.* The agent first proposed elaborate machinery (curriculum + router +
-  voting); the actual win was a small, correct reward fix. Lesson: diagnose the simple thing first.
-
----
-
-## 6. Reproducibility of the agentic workflow
-
-Every code change the agent made is in the repo and unit-tested (`tests/`); every result is
-reproducible from the commands in [`results.md`](results.md) and [`../README.md`](../README.md) using
-only the open-weight base model and the provided LoRA adapter — no API keys, no closed models.
+**Did not work / chose to drop**
+- **Self-consistency voting** lifted the high-variance base model more than our trained model, so it
+  *shrank* our measured advantage — we dropped it and kept **single-shot** inference (lower latency).
+- **Extra machinery** (a self-difficulty curriculum and an adaptive think/no-think router) was
+  implemented but the winning run did not use it; we deliberately shipped a **single, efficient model**
+  rather than a multi-component system, and document those parts honestly as optional extensions.

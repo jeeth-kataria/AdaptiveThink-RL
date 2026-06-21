@@ -156,7 +156,7 @@ These are designed and present in the repo as optional/future work. **The KPI re
 
 ## Project Artefacts
 
-- **Documentation** — [`docs/results.md`](docs/results.md) (full KPI tables, generalization, efficiency, reproduce commands), [`docs/technical.md`](docs/technical.md) (stack, architecture, design decisions), [`docs/ax.md`](docs/ax.md) (agentic-AI & open-weight usage), and [`docs/journey.md`](docs/journey.md) — **the honest development log: what failed, what fixed it, and the insights gained.**
+- **Documentation** — [`docs/results.md`](docs/results.md) (full KPI tables, generalization, efficiency, reproduce commands), [`docs/technical.md`](docs/technical.md) (stack, architecture, design decisions), [`docs/ax.md`](docs/ax.md) (open-weight models, API-free RLVR & reasoning approach), and [`docs/journey.md`](docs/journey.md) — **the honest development log: what failed, what fixed it, and the insights gained.**
 - **Source Code** — [`src/adaptivethink/`](src/adaptivethink/): RL trainer ([`rl/drgrpo_train.py`](src/adaptivethink/rl/drgrpo_train.py)), rewards ([`rl/rewards.py`](src/adaptivethink/rl/rewards.py)), robust matcher shared by train + eval ([`router/reward.py`](src/adaptivethink/router/reward.py)), data ([`rl/data.py`](src/adaptivethink/rl/data.py)); evaluator ([`eval/eval_kpi.py`](eval/eval_kpi.py)).
 - **Models Used** (open-weight only): [`Qwen/Qwen2.5-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) (Apache-2.0). *No teacher model and no LLM API are used anywhere.*
 - **Models Published**: `statezero/adaptivethink-rl-1.5b-grpo-lora` — the RL-trained QLoRA adapter <!-- TODO: publish + link -->
