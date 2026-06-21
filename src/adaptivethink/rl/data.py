@@ -10,8 +10,13 @@ Dataset ids / fields are taken VERBATIM from the DATA research:
                   number with thousands-commas stripped.
   * StrategyQA  : ChilleD/StrategyQA (primary; real train=1600 / test=687 splits,
                   both labeled). Fields: question (str), answer (bool). Gold mapped
-                  to "yes"/"no". Fallback: wics/strategy-qa (single labeled "test"
-                  split of 2290, self-split to avoid leakage).
+                  to "True"/"False" (the reward matcher treats True/False and
+                  yes/no as equivalent boolean synonyms). Fallback:
+                  wics/strategy-qa (single labeled "test" split of 2290, self-split
+                  to avoid leakage).
+  * AQuA-RAT    : deepmind/aqua_rat, config "raw". Fields: question (str),
+                  options (list of 'A)..' strings), correct (letter 'A'-'E').
+                  Prompt = question + lettered '(A)..(E)' options; gold = letter.
 
 The prompt reuses the repo's <think>/<answer> RLVR convention. We keep the SAME
 template for training and (downstream) eval so the before/after delta is not
@@ -32,13 +37,21 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Optional, Sequence
 
-SUPPORTED_DATASETS = ("gsm8k", "strategyqa")
+SUPPORTED_DATASETS = ("gsm8k", "strategyqa", "aqua")
+
+# Accept a couple of common aliases on the --datasets spec.
+_DATASET_ALIASES = {"aqua_rat": "aqua", "aquarat": "aqua"}
 
 # HF dataset ids (DATA research concrete_spec).
 GSM8K_ID = "openai/gsm8k"
 GSM8K_CONFIG = "main"
 STRATEGYQA_PRIMARY_ID = "ChilleD/StrategyQA"
 STRATEGYQA_FALLBACK_ID = "wics/strategy-qa"
+AQUA_ID = "deepmind/aqua_rat"
+AQUA_CONFIG = "raw"
+
+# Default train-pool mix sizes (45/30/25 of ~6.1k). One-flag overridable.
+DEFAULT_POOL_SIZES = {"gsm8k": 3000, "strategyqa": 1603, "aqua": 1500}
 
 # RLVR instruction: chain-of-thought in <think>, final answer in <answer>.
 SYSTEM_PROMPT = (
@@ -90,7 +103,12 @@ def gsm8k_to_row(example: dict, instruction: str = SYSTEM_PROMPT) -> dict:
 
 
 def strategyqa_to_row(example: dict, instruction: str = SYSTEM_PROMPT) -> dict:
-    """Map a StrategyQA row (bool gold) to the uniform schema (yes/no gold)."""
+    """Map a StrategyQA row (bool gold) to the uniform schema (True/False gold).
+
+    The reward matcher (router.reward._answers_match) treats True/False and
+    yes/no as equivalent boolean synonyms, so 'True'/'False' is a safe gold and
+    keeps the train labels aligned with loaders.load_strategyqa_train.
+    """
     question = example["question"]
     ans = example["answer"]
     # ChilleD/StrategyQA & wics/strategy-qa expose a python bool; be defensive.
@@ -98,22 +116,51 @@ def strategyqa_to_row(example: dict, instruction: str = SYSTEM_PROMPT) -> dict:
         yes = ans.strip().lower() in ("true", "yes", "1")
     else:
         yes = bool(ans)
-    instr = f"{instruction}\nAnswer yes or no."
+    instr = f"{instruction}\nAnswer True or False."
     return {
         "prompt": _build_prompt(question, instr),
-        "answer": "yes" if yes else "no",
+        "answer": "True" if yes else "False",
         "dataset": "strategyqa",
         "question": question,
+    }
+
+
+def _format_aqua_options(options) -> str:
+    """Render AQuA-RAT options as clean '(A) value' lines.
+
+    deepmind/aqua_rat ships options as letter-prefixed strings (e.g. 'A)125').
+    We strip any leading letter+separator and re-emit a uniform '(A) <value>'.
+    """
+    lines = []
+    for i, opt in enumerate(options):
+        letter = chr(65 + i)
+        text = re.sub(r"^\(?[A-Ea-e]\)?\s*[).:\-]?\s*", "", str(opt).strip()).strip()
+        lines.append(f"({letter}) {text}")
+    return "\n".join(lines)
+
+
+def aqua_to_row(example: dict, instruction: str = SYSTEM_PROMPT) -> dict:
+    """Map an AQuA-RAT row to the uniform schema (gold = option letter)."""
+    question = example["question"]
+    options = _format_aqua_options(example["options"])
+    full_q = f"{question}\n{options}"
+    instr = f"{instruction}\nAnswer with the letter of the correct option."
+    return {
+        "prompt": _build_prompt(full_q, instr),
+        "answer": str(example["correct"]).strip(),
+        "dataset": "aqua",
+        "question": full_q,
     }
 
 
 # ── --datasets parsing ────────────────────────────────────────────────────────
 
 def parse_datasets(spec: str) -> list[str]:
-    """Parse a '--datasets gsm8k,strategyqa' spec into a validated name list."""
+    """Parse a '--datasets gsm8k,strategyqa,aqua' spec into a validated list."""
     names = [s.strip().lower() for s in spec.split(",") if s.strip()]
+    names = [_DATASET_ALIASES.get(n, n) for n in names]
     if not names:
-        raise ValueError("--datasets is empty; expected e.g. 'gsm8k,strategyqa'")
+        raise ValueError("--datasets is empty; expected e.g. 'gsm8k,strategyqa,aqua'")
     unknown = [n for n in names if n not in SUPPORTED_DATASETS]
     if unknown:
         raise ValueError(
@@ -151,6 +198,13 @@ def _load_strategyqa_rows(split: str, instruction: str) -> list[dict]:
     return [strategyqa_to_row(r, instruction) for r in ds]
 
 
+def _load_aqua_rows(split: str, instruction: str) -> list[dict]:
+    from datasets import load_dataset
+
+    ds = load_dataset(AQUA_ID, AQUA_CONFIG, split=split)
+    return [aqua_to_row(r, instruction) for r in ds]
+
+
 def load_rows(
     names: Sequence[str],
     split: str = "train",
@@ -159,13 +213,69 @@ def load_rows(
     """Load + map the requested datasets into a single list of uniform rows."""
     rows: list[dict] = []
     for name in names:
+        name = _DATASET_ALIASES.get(name, name)
         if name == "gsm8k":
             rows.extend(_load_gsm8k_rows(split, instruction))
         elif name == "strategyqa":
             rows.extend(_load_strategyqa_rows(split, instruction))
+        elif name == "aqua":
+            rows.extend(_load_aqua_rows(split, instruction))
         else:  # pragma: no cover — parse_datasets already validated
             raise ValueError(f"Unsupported dataset: {name}")
     return rows
+
+
+# ── GRPO train-pool builder (mixed list) ──────────────────────────────────────
+
+def _subset(rows: list[dict], n: Optional[int], seed: int) -> list[dict]:
+    """Deterministically shuffle then take the first ``n`` rows (all if n falsy)."""
+    import random
+
+    if not n or n >= len(rows):
+        return rows
+    shuffled = rows[:]
+    random.Random(seed).shuffle(shuffled)
+    return shuffled[:n]
+
+
+def build_grpo_pool(
+    seed: int = 0,
+    n_gsm8k: int = 3000,
+    n_strategyqa: int = 1603,
+    n_aqua: int = 1500,
+    instruction: str = SYSTEM_PROMPT,
+) -> list[dict]:
+    """Build the mixed Dr.GRPO train pool (~6.1k, 45/30/25 gsm8k/strategyqa/aqua).
+
+    Returns a shuffled list of ``{prompt, answer, source}`` rows. Each component
+    is loaded from its TRAIN split (gsm8k train, ChilleD/StrategyQA train, aqua
+    raw train), mapped with the repo's <think>/<answer> prompt style, then capped
+    to its per-dataset size before a final deterministic shuffle.
+
+    HARD RULE: only train splits are touched here — never mmlu, never any test
+    split.
+    """
+    per_dataset = (
+        ("gsm8k", _load_gsm8k_rows, n_gsm8k),
+        ("strategyqa", _load_strategyqa_rows, n_strategyqa),
+        ("aqua", _load_aqua_rows, n_aqua),
+    )
+    pool: list[dict] = []
+    for i, (name, loader, n) in enumerate(per_dataset):
+        rows = loader("train", instruction)
+        # Per-dataset seed offset so each cap subsamples independently.
+        rows = _subset(rows, n, seed=seed + i)
+        for r in rows:
+            pool.append(
+                {"prompt": r["prompt"], "answer": r["answer"], "source": name}
+            )
+
+    import random
+
+    random.Random(seed).shuffle(pool)
+    if not pool:
+        raise ValueError("build_grpo_pool produced 0 rows — check pool sizes/splits")
+    return pool
 
 
 # ── difficulty filter (offline, base-model pass-rate) ─────────────────────────
@@ -228,6 +338,51 @@ def difficulty_filter_rows(
     return kept
 
 
+# ── CCDD curriculum filter (offline, from a precomputed self_difficulty.jsonl) ─
+
+def load_self_difficulty(path: str) -> dict:
+    """Map question -> solve_rate from a CCDD self_difficulty.jsonl.
+
+    Accepts rows carrying either ``solve_rate`` or ``difficulty``
+    (solve_rate = 1 - difficulty). Keyed by ``question``. stdlib only.
+    """
+    import json
+
+    out: dict = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            q = r.get("question")
+            sr = r.get("solve_rate")
+            if sr is None and r.get("difficulty") is not None:
+                sr = 1.0 - float(r["difficulty"])
+            if q is not None and sr is not None:
+                out[str(q)] = float(sr)
+    return out
+
+
+def apply_ccdd_filter(
+    rows: Sequence[dict], self_difficulty_file: str, drop_trivial: bool = True
+) -> list[dict]:
+    """CCDD curriculum: drop rows whose precomputed solve_rate is 0 or 1.
+
+    solve_rate is looked up by the row's 'question'. Unlabeled rows are KEPT
+    (conservative). Reuses keep_item's learnable-band logic (0 < p < 1).
+    """
+    sr_map = load_self_difficulty(self_difficulty_file)
+    kept: list[dict] = []
+    for row in rows:
+        sr = sr_map.get(str(row.get("question")))
+        if sr is None:
+            kept.append(row)
+        elif keep_item(sr, drop_trivial=drop_trivial):
+            kept.append({**row, "p_solve": sr})
+    return kept
+
+
 # ── top-level builder ─────────────────────────────────────────────────────────
 
 def _shuffle_and_subset(
@@ -266,6 +421,7 @@ def build_dataset(
     one_shot: bool = False,
     max_items: Optional[int] = None,
     instruction: str = SYSTEM_PROMPT,
+    self_difficulty_file: Optional[str] = None,
     base_generate: Optional[BaseGenerateFn] = None,
     verify: Optional[VerifyFn] = None,
     difficulty_k: int = 8,
@@ -284,6 +440,10 @@ def build_dataset(
     from datasets import Dataset
 
     rows = load_rows(names, split=split, instruction=instruction)
+
+    # CCDD curriculum: offline filter using precomputed self-difficulty labels.
+    if self_difficulty_file:
+        rows = apply_ccdd_filter(rows, self_difficulty_file, drop_trivial=drop_trivial)
 
     if base_generate is not None and verify is not None:
         rows = difficulty_filter_rows(

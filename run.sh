@@ -31,10 +31,10 @@ LOCK_FILE="$REPO_ROOT/requirements.lock"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR" "$OUT_DIR" "$RESULTS_DIR/baseline" "$RESULTS_DIR/trained" "$RESULTS_DIR/figures"
 
 # --- Model + benchmark defaults (overridable via flags / env) --------------
-MODEL="${MODEL:-Qwen/Qwen2.5-3B-Instruct}"        # fallback: Qwen/Qwen2.5-1.5B-Instruct
-DATASETS="${DATASETS:-gsm8k,strategyqa}"          # improve targets; MMLU = maintain
-SEEDS="${SEEDS:-0,1,2}"                            # multi-seed RL (high variance)
-STEPS="${STEPS:-1500}"                             # GRPO steps
+MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"      # +5% headroom; 3B/7B = one-flag switch
+DATASETS="${DATASETS:-gsm8k,strategyqa,aqua}"     # improve targets; MMLU = maintain
+SEEDS="${SEEDS:-0,1,2}"                            # multi-seed eval (high variance)
+STEPS="${STEPS:-400}"                             # Dr.GRPO steps (24h recipe)
 SFT_STEPS="${SFT_STEPS:-500}"
 LOSS="${LOSS:-dr_grpo}"                            # dr_grpo (default) | grpo
 KL="${KL:-0.0}"                                    # KL off by default (Lavaee SLM finding)
@@ -236,6 +236,20 @@ cmd_setup() {
     pip_install "$PIN_TORCH" "$PIN_TORCHVISION" "$PIN_TORCHAUDIO" --extra-index-url "$PIP_CUDA_INDEX" || die "torch trio pin failed (step 2)."
   fi
 
+  # ---- STEP 2b: CUDA-13 hosts need the cu130 vLLM build ----------------------
+  # PyPI vllm==0.19.1 is a CUDA-12 wheel; Unsloth's fast_inference (in-process
+  # vLLM rollout) refuses to start when vLLM's CUDA != the host CUDA. Detect a
+  # CUDA-13 host and swap in the matching cu130 wheel (--no-deps: binary only).
+  local _cuda_major
+  _cuda_major="$(nvcc --version 2>/dev/null | grep -oE 'release [0-9]+' | grep -oE '[0-9]+$' \
+    || nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+' | grep -oE '[0-9]+$' || echo '')"
+  if [[ "$_cuda_major" == "13" ]]; then
+    banner "deps 2b — CUDA 13 host detected: swapping vLLM to the cu130 build"
+    pip_install --no-deps \
+      "https://github.com/vllm-project/vllm/releases/download/v0.19.1/vllm-0.19.1+cu130-cp38-abi3-manylinux_2_35_x86_64.whl" \
+      || warn "cu130 vLLM swap failed — fast_inference may not start; install that wheel manually."
+  fi
+
   # ---- STEP 3: Unsloth + training stack, pinned INTO the resolved window -----
   banner "deps 3/6 — Unsloth + transformers/trl/peft/accelerate/bnb/datasets"
   pip_install \
@@ -369,7 +383,7 @@ from datasets import Dataset
 
 steps = int(os.environ.get("GRPO_SMOKE_STEPS", "1"))
 model, tok = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Qwen2.5-3B-Instruct",
+    model_name="unsloth/Qwen2.5-1.5B-Instruct",
     max_seq_length=1024, load_in_4bit=True,
     fast_inference=True,                          # in-process vLLM rollouts
     max_lora_rank=16, gpu_memory_utilization=0.6,

@@ -1,8 +1,13 @@
-"""Data loaders for GSM8K, MATH-500, StrategyQA, MMLU."""
-from datasets import load_dataset
+"""Data loaders for GSM8K, MATH-500, StrategyQA, AQuA-RAT, MMLU.
+
+``load_dataset`` is imported lazily inside each loader so that importing this
+module (and ``python -m py_compile``) succeeds without ``datasets`` installed.
+"""
 
 
 def load_gsm8k(split="train", seed=0, n=None):
+    from datasets import load_dataset
+
     ds = load_dataset("openai/gsm8k", "main", split=split)
     if n:
         ds = ds.shuffle(seed=seed).select(range(n))
@@ -10,20 +15,96 @@ def load_gsm8k(split="train", seed=0, n=None):
 
 
 def load_math500(seed=0, n=None):
+    from datasets import load_dataset
+
     ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
     if n:
         ds = ds.shuffle(seed=seed).select(range(n))
     return [{"question": r["problem"], "answer": r["answer"]} for r in ds]
 
 
+def _bool_to_gold(value) -> str:
+    """Map a StrategyQA gold (bool or stringy bool) to 'True'/'False'.
+
+    The reward matcher (router.reward._answers_match) treats 'True'/'False' and
+    'yes'/'no' as equivalent boolean synonyms, so 'True'/'False' is a safe gold.
+    """
+    if isinstance(value, str):
+        is_true = value.strip().lower() in ("true", "yes", "1")
+    else:
+        is_true = bool(value)
+    return "True" if is_true else "False"
+
+
 def load_strategyqa(seed=0, n=None):
+    """Held-out StrategyQA test set via wics/strategy-qa (its only labeled split).
+
+    Use this for EVAL/sanity. For TRAIN labels use ``load_strategyqa_train``,
+    which reads the ChilleD/StrategyQA train split.
+    """
+    from datasets import load_dataset
+
     ds = load_dataset("wics/strategy-qa", split="test")
     if n:
         ds = ds.shuffle(seed=seed).select(range(n))
-    return [{"question": r["question"], "answer": str(r["answer"])} for r in ds]
+    return [{"question": r["question"], "answer": _bool_to_gold(r["answer"])} for r in ds]
+
+
+def load_strategyqa_train(split="train", seed=0, n=None):
+    """StrategyQA TRAIN labels via ChilleD/StrategyQA (real labeled train split).
+
+    Gold boolean is mapped to the string 'True'/'False'. Kept separate from
+    ``load_strategyqa`` (wics/strategy-qa test) so train/eval never leak.
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("ChilleD/StrategyQA", split=split)
+    if n:
+        ds = ds.shuffle(seed=seed).select(range(n))
+    return [{"question": r["question"], "answer": _bool_to_gold(r["answer"])} for r in ds]
+
+
+def _format_aqua_options(options) -> str:
+    """Render AQuA-RAT options as clean '(A) value' lines.
+
+    deepmind/aqua_rat ships options as a list of strings already prefixed with
+    their letter, e.g. ['A)125', 'B)150', ...]. We strip any leading
+    'A)' / 'A.' / 'A:' style prefix and re-emit a uniform '(A) <value>' line so
+    the prompt is consistent regardless of the source punctuation.
+    """
+    import re
+
+    lines = []
+    for i, opt in enumerate(options):
+        letter = chr(65 + i)
+        text = str(opt).strip()
+        # Strip a leading option letter + separator (e.g. 'A)', 'A.', 'A:', '(A)').
+        text = re.sub(r"^\(?[A-Ea-e]\)?\s*[).:\-]?\s*", "", text).strip()
+        lines.append(f"({letter}) {text}")
+    return "\n".join(lines)
+
+
+def load_aqua_rat(split="train", seed=0, n=None):
+    """AQuA-RAT (deepmind/aqua_rat, config 'raw') -> {question, answer}.
+
+    question = problem text + newline + lettered options '(A) .. (E)'.
+    answer   = the correct option letter ('A'-'E').
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("deepmind/aqua_rat", "raw", split=split)
+    if n:
+        ds = ds.shuffle(seed=seed).select(range(min(n, len(ds))))
+    items = []
+    for r in ds:
+        question = f"{r['question']}\n{_format_aqua_options(r['options'])}"
+        items.append({"question": question, "answer": str(r["correct"]).strip()})
+    return items
 
 
 def load_mmlu(subjects=None, seed=0, n=None):
+    from datasets import load_dataset
+
     subjects = subjects or ["high_school_mathematics", "college_mathematics", "abstract_algebra"]
     items = []
     for subj in subjects:
@@ -41,6 +122,8 @@ def load_mmlu(subjects=None, seed=0, n=None):
 
 def load_aime24(seed=0, n=None):
     """AIME 2024 — 30 advanced-math problems. Integer answers 0-999."""
+    from datasets import load_dataset
+
     ds = load_dataset("Maxwell-Jia/AIME_2024", split="train")
     if n:
         ds = ds.shuffle(seed=seed).select(range(min(n, len(ds))))
@@ -56,6 +139,8 @@ def load_benchmark(name, split="test", seed=0, n=None):
         return load_math500(seed=seed, n=n)
     if name == "strategyqa":
         return load_strategyqa(seed=seed, n=n)
+    if name in ("aqua", "aqua_rat"):
+        return load_aqua_rat(split=split, seed=seed, n=n)
     if name == "mmlu":
         return load_mmlu(seed=seed, n=n)
     if name == "aime24":

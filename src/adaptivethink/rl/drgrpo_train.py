@@ -3,8 +3,10 @@
 Implements Strategy 1's RL stage: Dr.GRPO (constant length-normalization + no
 per-group std division) with the small-model-safe DAPO trick (overlong
 filtering), no KL, and a rule-based RLVR reward (correctness + small format).
+No teacher API anywhere — the reward is pure exact-match and the curriculum
+signal (CCDD) comes from the base model's OWN solve-rate.
 
-Config knobs map VERBATIM to TRL 0.24.0 GRPOConfig (ALGO research):
+Config knobs map VERBATIM to TRL GRPOConfig (ALGO research):
   * loss_type="dr_grpo"            — constant 1/(L*G) denom (kills length bias)
   * scale_rewards=False            — no per-group std div (kills difficulty bias)
   * beta=<--kl>  (default 0.0)     — KL off => no ref model loaded (saves memory)
@@ -14,7 +16,14 @@ Config knobs map VERBATIM to TRL 0.24.0 GRPOConfig (ALGO research):
   * num_generations=<--group-size> — G; effective batch must be divisible by it
   * max_completion_length=L        — Dr.GRPO's normalization constant + trunc cap
 
-NOTE (ALGO research pitfall): TRL's default loss_type is now "dapo" (token-level,
+CCDD curriculum (the API-free novelty): a separate self-difficulty pass writes
+data/self_difficulty.jsonl with rows {question, answer, difficulty}, where
+difficulty = 1 - (base model's empirical solve-rate over K rollouts per item),
+scored with the SAME verifier the reward uses. When --self-difficulty-file is
+given, we DROP pool items whose solve_rate is 0.0 (unsolvable) or 1.0 (trivial)
+— both yield zero-advantage GRPO groups. When absent, we train on the full pool.
+
+NOTE (ALGO research pitfall): TRL's default loss_type is "dapo" (token-level,
 which the cited ablation flags as harmful for sub-3B models). We ALWAYS set
 loss_type explicitly. There is NO additive entropy bonus in TRL — ``--entropy``
 maps to ``top_entropy_quantile`` (a token-mask), and for tiny models we keep it
@@ -25,10 +34,11 @@ functions so the module imports / compiles without them installed.
 
 Run:
   python -m adaptivethink.rl.drgrpo_train \
-      --model Qwen/Qwen2.5-3B-Instruct --datasets gsm8k,strategyqa \
-      --out outputs/grpo-seed0 --steps 1500 --seed 0 \
+      --model Qwen/Qwen2.5-1.5B-Instruct --datasets gsm8k,strategyqa,aqua \
+      --out outputs/grpo-seed0 --steps 400 --seed 0 \
       --loss dr_grpo --kl 0.0 --no-clip-higher --entropy 1.0 \
-      --difficulty-filter --no-one-shot --max-seq-len 2048 --group-size 8
+      --self-difficulty-file data/self_difficulty.jsonl \
+      --group-size 8 --max-prompt-length 512 --max-completion-length 1024
 """
 from __future__ import annotations
 
@@ -37,13 +47,20 @@ import glob
 import os
 import sys
 
-# Default + fallback models (interface contract).
-DEFAULT_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-FALLBACK_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+# Default model (interface contract). 3B/7B are one-flag --model switches; all
+# Qwen2.5 share ChatML + the same 7 LoRA modules. Do NOT hardcode DeepSeek.
+DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+
+# Default training datasets (the three IMPROVE targets).
+DEFAULT_DATASETS = "gsm8k,strategyqa,aqua"
+
+# Default CCDD self-difficulty file (curriculum signal; same schema the verifier
+# consumes). Empty string => curriculum filter OFF (train on full pool).
+DEFAULT_SELF_DIFFICULTY_FILE = "data/self_difficulty.jsonl"
 
 # VRAM threshold (GB) for colocated vLLM rollouts (contract: >= 22 GB).
 VLLM_VRAM_GB = 22.0
-# LoRA target modules for Qwen2.5 dense models.
+# LoRA target modules — shared by ALL Qwen2.5 dense models (1.5B/3B/7B).
 LORA_TARGETS = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
@@ -69,13 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"HF model id (default {DEFAULT_MODEL}; "
-                        f"fallback {FALLBACK_MODEL}).")
-    p.add_argument("--datasets", default="gsm8k,strategyqa",
-                   help="Comma-separated dataset names (gsm8k,strategyqa).")
+                        "3B/7B are one-flag switches).")
+    p.add_argument("--datasets", default=DEFAULT_DATASETS,
+                   help=f"Comma-separated dataset names (default "
+                        f"'{DEFAULT_DATASETS}').")
     p.add_argument("--out", required=True,
                    help="Output dir for the LoRA adapter + checkpoints "
                         "(e.g. outputs/grpo-seed0).")
-    p.add_argument("--steps", type=int, default=1500, help="Max training steps.")
+    p.add_argument("--steps", type=int, default=400, help="Max training steps.")
     p.add_argument("--seed", type=int, default=0, help="Random seed (multi-seed).")
     p.add_argument("--loss", choices=["grpo", "dr_grpo"], default="dr_grpo",
                    help="Loss normalization variant (Dr.GRPO recommended).")
@@ -87,24 +105,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--entropy", type=float, default=1.0,
                    help="top_entropy_quantile (token-mask; 1.0=all tokens). "
                         "TRL has no additive entropy bonus.")
-    _add_bool_pair(p, "difficulty-filter", default=False,
-                   help_text="Offline difficulty filter: drop base-model "
-                             "unsolvable/trivial items before RL.")
+    # CCDD curriculum: self-difficulty file (the API-free novelty). When given,
+    # drop pool items whose solve_rate is 0.0 (unsolvable) or 1.0 (trivial).
+    p.add_argument("--self-difficulty-file", dest="self_difficulty_file",
+                   default=DEFAULT_SELF_DIFFICULTY_FILE,
+                   help="data/self_difficulty.jsonl with rows "
+                        "{question, answer, difficulty}. When present, applies "
+                        "the CCDD curriculum filter (drop solve_rate 0.0/1.0). "
+                        "Pass '' to disable and train on the full pool.")
     _add_bool_pair(p, "one-shot", default=False,
                    help_text="Tiny one-item-per-dataset subset (smoke pipeline).")
-    p.add_argument("--max-seq-len", type=int, default=2048,
-                   help="Total seq len; split into prompt + completion caps.")
+    p.add_argument("--max-prompt-length", dest="max_prompt_length",
+                   type=int, default=512,
+                   help="GRPOConfig max_prompt_length (Dr.GRPO 24h config).")
+    p.add_argument("--max-completion-length", dest="max_completion_length",
+                   type=int, default=1024,
+                   help="GRPOConfig max_completion_length; also the Dr.GRPO 1/L "
+                        "normalization constant + truncation cap.")
     p.add_argument("--group-size", type=int, default=8,
                    help="num_generations G per prompt.")
     # Auxiliary (not in the core contract string but needed for a runnable train).
     p.add_argument("--lr", type=float, default=1e-6,
-                   help="Learning rate (GRPOConfig default for RL).")
+                   help="Learning rate (Dr.GRPO 24h config).")
     p.add_argument("--batch", type=int, default=8,
                    help="per_device_train_batch_size.")
     p.add_argument("--grad-accum", type=int, default=4,
                    help="gradient_accumulation_steps.")
-    p.add_argument("--difficulty-k", type=int, default=8,
-                   help="Samples per item for the difficulty filter.")
     p.add_argument("--max-train-items", type=int, default=None,
                    help="Optional cap on training rows (after filter/shuffle).")
     p.add_argument("--save-steps", type=int, default=50,
@@ -141,6 +167,15 @@ def _load_model(model_id: str, max_seq_len: int, lora_r: int, lora_alpha: int):
             max_seq_length=max_seq_len,
             load_in_4bit=True,
             dtype=None,
+            # Colocated vLLM rollout engine, Unsloth-managed (the canonical GRPO
+            # path). enforce_eager=True disables vLLM's torch.compile, which
+            # crashes on vLLM 0.19.1 + torch 2.10 ('SymInt' not subscriptable in
+            # the rotary-embedding inductor graph). Eager is slightly slower but
+            # rollouts still use fast PagedAttention.
+            fast_inference=True,
+            max_lora_rank=lora_r,
+            gpu_memory_utilization=0.45,
+            enforce_eager=True,
         )
         model = FastLanguageModel.get_peft_model(
             model,
@@ -179,52 +214,6 @@ def _load_model(model_id: str, max_seq_len: int, lora_r: int, lora_alpha: int):
     )
     model = get_peft_model(model, lora_cfg)
     return model, tokenizer
-
-
-# ── difficulty-filter wiring (frozen base sampling + repo verifier) ───────────
-
-def _make_base_generate(model, tokenizer, max_new_tokens: int):
-    """Build a (prompt, k) -> [k completions] sampler over the frozen base model.
-
-    Used only for the offline difficulty filter. Sampling is at temperature ~0.9
-    (DATA research) to estimate the base pass-rate honestly.
-    """
-    import torch
-
-    def base_generate(prompt: str, k: int):
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                do_sample=True,
-                temperature=0.9,
-                top_p=0.95,
-                num_return_sequences=k,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            )
-        prompt_len = inputs["input_ids"].shape[1]
-        return [tokenizer.decode(o[prompt_len:], skip_special_tokens=True)
-                for o in out]
-
-    return base_generate
-
-
-def _make_verify():
-    """Return a (completion_text, gold) -> bool verifier reusing the repo logic.
-
-    Uses the SAME prediction + matching path as the training reward
-    (``rewards.predicted_answer`` + the repo's ``_answers_match``) so the
-    difficulty filter's notion of 'solved' is identical to the reward signal.
-    """
-    from adaptivethink.rl.rewards import predicted_answer
-    from adaptivethink.router.reward import _answers_match
-
-    def verify(text: str, gold: str) -> bool:
-        pred = predicted_answer(text)
-        return pred is not None and _answers_match(pred, str(gold))
-
-    return verify
 
 
 # ── checkpoint / resume ───────────────────────────────────────────────────────
@@ -304,6 +293,28 @@ def _build_grpo_config(args, max_prompt_len: int, max_completion_len: int,
     return GRPOConfig(**cfg_kwargs)
 
 
+# ── CCDD self-difficulty resolution ───────────────────────────────────────────
+
+def _resolve_self_difficulty_file(args) -> str | None:
+    """Return the self-difficulty path to use, or None (curriculum OFF).
+
+    The CCDD filter is applied only when the file is explicitly configured AND
+    exists on disk. An unset/empty flag, or a missing file, falls back to the
+    full pool (no curriculum), with a clear log line either way.
+    """
+    path = (args.self_difficulty_file or "").strip()
+    if not path:
+        print("[ccdd] No --self-difficulty-file; training on the FULL pool.")
+        return None
+    if not os.path.isfile(path):
+        print(f"[ccdd] self-difficulty file not found ({path!r}); "
+              "training on the FULL pool (run the self-difficulty pass first).")
+        return None
+    print(f"[ccdd] Curriculum filter ON via {path}: "
+          "dropping items with solve_rate 0.0 (unsolvable) or 1.0 (trivial).")
+    return path
+
+
 # ── train ─────────────────────────────────────────────────────────────────────
 
 def train(args) -> None:
@@ -322,13 +333,17 @@ def train(args) -> None:
     gb = _gpu_gb()
     use_vllm = gb >= VLLM_VRAM_GB
     print(f"[config] VRAM={gb:.1f} GB | vLLM(colocate)={use_vllm} | "
+          f"model={args.model} | datasets={names} | "
           f"loss={args.loss} | kl(beta)={args.kl} | "
           f"clip_higher={args.clip_higher} | entropy_q={args.entropy} | "
-          f"group_size={args.group_size} | seed={args.seed}")
+          f"group_size={args.group_size} | "
+          f"max_prompt={args.max_prompt_length} | "
+          f"max_completion={args.max_completion_length} | seed={args.seed}")
 
-    # Seq-len budget: split into prompt + completion caps.
-    max_prompt_len = max(256, args.max_seq_len // 4)
-    max_completion_len = args.max_seq_len - max_prompt_len
+    max_prompt_len = args.max_prompt_length
+    max_completion_len = args.max_completion_length
+    # The model context must hold prompt + completion.
+    max_seq_len = max_prompt_len + max_completion_len
 
     # wandb (offline if no key) — optional.
     if os.environ.get("WANDB_API_KEY"):
@@ -341,20 +356,13 @@ def train(args) -> None:
             print(f"[wandb] init skipped: {exc!r}")
 
     model, tokenizer = _load_model(
-        args.model, args.max_seq_len, args.lora_r, args.lora_alpha
+        args.model, max_seq_len, args.lora_r, args.lora_alpha
     )
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Optional offline difficulty filter (frozen base sampling + repo verifier).
-    base_generate = None
-    verify = None
-    if args.difficulty_filter:
-        print(f"[filter] Difficulty filter ON (k={args.difficulty_k}): "
-              "dropping base-unsolvable/trivial items.")
-        base_generate = _make_base_generate(model, tokenizer,
-                                            max_new_tokens=max_completion_len)
-        verify = _make_verify()
+    # CCDD curriculum: drop solve_rate 0.0/1.0 items via the self-difficulty file.
+    self_difficulty_file = _resolve_self_difficulty_file(args)
 
     dataset = rl_data.build_dataset(
         names,
@@ -362,10 +370,7 @@ def train(args) -> None:
         seed=args.seed,
         one_shot=args.one_shot,
         max_items=args.max_train_items,
-        base_generate=base_generate,
-        verify=verify,
-        difficulty_k=args.difficulty_k,
-        drop_trivial=True,
+        self_difficulty_file=self_difficulty_file,
     )
     print(f"[data] {len(dataset)} training rows from {names}")
 

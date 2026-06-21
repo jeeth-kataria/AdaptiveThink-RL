@@ -14,7 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# Default model is a --model flag, not a hardcoded constant. All Qwen2.5 sizes
+# (1.5B/3B/7B) share ChatML + the same 7 LoRA target modules, so a 3B/7B switch
+# is a one-flag change. The headline RL path lives in rl/drgrpo_train.py; this
+# legacy router trainer remains runnable.
+DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 # ── GPU profile ──────────────────────────────────────────────────────────────
@@ -61,10 +65,17 @@ def _load_data(path: str, verifier_model, verifier_tok, device: str):
     from adaptivethink.router.prompt import make_prompt
 
     items = [json.loads(l) for l in open(path)]
-    print(f"[data] Scoring {len(items)} items with verifier...")
-    difficulties = verifier_model.score(
-        [it["question"] for it in items], verifier_tok, device=device
-    )
+    if verifier_model is not None and verifier_tok is not None:
+        print(f"[data] Scoring {len(items)} items with verifier...")
+        difficulties = verifier_model.score(
+            [it["question"] for it in items], verifier_tok, device=device
+        )
+    else:
+        # No verifier checkpoint supplied: fall back to a neutral difficulty so
+        # this legacy router trainer still runs (the headline path is
+        # rl/drgrpo_train.py, which needs no verifier).
+        print("[data] No verifier ckpt — using neutral difficulty 0.5")
+        difficulties = [0.5] * len(items)
     rows = [
         {"prompt": make_prompt(it["question"]), "answer": it["answer"], "difficulty": d}
         for it, d in zip(items, difficulties)
@@ -118,15 +129,18 @@ def train(args):
 
     device = "cuda"
 
-    # Load verifier
-    from adaptivethink.verifier.model import load_verifier
-    verifier, vtok = load_verifier(args.verifier_ckpt, device)
+    # Load verifier (optional — the headline path is rl/drgrpo_train.py, which
+    # needs no verifier; when no ckpt is given we fall back to neutral difficulty).
+    verifier = vtok = None
+    if args.verifier_ckpt:
+        from adaptivethink.verifier.model import load_verifier
+        verifier, vtok = load_verifier(args.verifier_ckpt, device)
 
     # Load model
     try:
         from unsloth import FastLanguageModel
         model, tokenizer = FastLanguageModel.from_pretrained(
-            MODEL_NAME, max_seq_length=cfg["max_seq_len"], load_in_4bit=True, dtype=None,
+            args.model, max_seq_length=cfg["max_seq_len"], load_in_4bit=True, dtype=None,
         )
         model = FastLanguageModel.get_peft_model(
             model, r=16, lora_alpha=32, lora_dropout=0,
@@ -139,8 +153,8 @@ def train(args):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         from peft import get_peft_model, LoraConfig, TaskType
         bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, quantization_config=bnb, device_map="auto")
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model = AutoModelForCausalLM.from_pretrained(args.model, quantization_config=bnb, device_map="auto")
         lora_cfg = LoraConfig(r=16, lora_alpha=32, task_type=TaskType.CAUSAL_LM,
                               target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
         model = get_peft_model(model, lora_cfg)
@@ -194,8 +208,11 @@ def train(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help="HF model id (any Qwen2.5 size shares ChatML + the 7 LoRA modules)")
     p.add_argument("--data", default="data/gsm8k_train_labelled.jsonl")
-    p.add_argument("--verifier-ckpt", default="outputs/verifier-400m/best.pt")
+    p.add_argument("--verifier-ckpt", default=None,
+                   help="optional verifier ckpt; if omitted, neutral difficulty 0.5 is used")
     p.add_argument("--output-dir", default="outputs/router-seed0")
     p.add_argument("--steps", type=int, default=0)       # 0 = auto
     p.add_argument("--batch", type=int, default=0)        # 0 = auto

@@ -26,6 +26,7 @@ __all__ = [
     "combined_reward",
     "make_reward_funcs",
     "build_dataset",
+    "build_grpo_pool",
     "parse_datasets",
     "SYSTEM_PROMPT",
 ]
@@ -36,7 +37,7 @@ def __getattr__(name):  # PEP 562 lazy attribute access
                 "make_reward_funcs"):
         from adaptivethink.rl import rewards
         return getattr(rewards, name)
-    if name in ("build_dataset", "parse_datasets", "SYSTEM_PROMPT"):
+    if name in ("build_dataset", "build_grpo_pool", "parse_datasets", "SYSTEM_PROMPT"):
         from adaptivethink.rl import data
         return getattr(data, name)
     raise AttributeError(f"module 'adaptivethink.rl' has no attribute {name!r}")
